@@ -441,6 +441,9 @@ body.live.transparente { background: transparent; }
 .dtv-mesas .w { color: var(--amarelo); }
 .dtv-copiar { display: inline-flex; align-items: center; gap: 6px; }
 
+.l-sim { font-style: normal; align-self: center; font-size: 20px; font-weight: 700; color: var(--noite); background: var(--azul-claro); padding: 3px 12px; border-radius: 20px; margin-left: 6px; }
+.selo { font-style: normal; vertical-align: middle; }
+
 </style>
 </head>
 <body>
@@ -1048,6 +1051,238 @@ body.live.transparente { background: transparent; }
 </script>
 <script>
 /* =========================================================================
+   AMOROSO CUP · LEITOR DAS ABAS DE OPERAÇÃO (T1 -AUTO / T2 -AUTO)
+   Transforma a grade da aba em jogadores, rodadas e grande final.
+   Guiado pelos rótulos da aba, então colunas e linhas podem mudar de lugar:
+     #ID / NICK ............ lista de jogadores
+     MESA / CONFRONTO / QUEM GANHOU? (1 = de cima, 2 = de baixo)
+     GRANDE FINAL / PLACAR / campeao
+     MODO: TESTE ........... marca a live como simulação
+   ========================================================================= */
+(function (root) {
+  'use strict';
+  var C = root.Core || (typeof require !== 'undefined' ? require('./core.js') : null);
+
+  function norm(s) {
+    return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[ㅤᅟᅠ​-‍⁠﻿­]/g, ' ')
+      .toUpperCase().replace(/\s+/g, ' ').trim();
+  }
+  function isErr(v) { return /^#(N\/A|REF!|VALUE!|ERROR!|DIV\/0!|NAME\?|NUM!|NULL!)/i.test(v) || /^(LOADING|CARREGANDO)/i.test(v); }
+  function val(g, r, c) {
+    var row = g[r];
+    if (!row || c < 0) return '';
+    var v = row[c];
+    v = v == null ? '' : String(v).trim();
+    return isErr(v) ? '' : v;
+  }
+  function width(g) { var w = 0; for (var i = 0; i < g.length; i++) if (g[i] && g[i].length > w) w = g[i].length; return w; }
+  function findFirst(g, test, r0, r1) {
+    r0 = r0 || 0; r1 = r1 == null ? g.length : r1;
+    for (var r = r0; r < r1; r++) {
+      var row = g[r] || [];
+      for (var c = 0; c < row.length; c++) if (test(norm(row[c]), r, c)) return { r: r, c: c };
+    }
+    return null;
+  }
+  function inRow(g, r, test, c0, c1) {
+    var row = g[r] || [];
+    c1 = c1 == null ? row.length : Math.min(c1, row.length);
+    for (var c = c0 || 0; c < c1; c++) if (test(norm(row[c]))) return c;
+    return -1;
+  }
+  var MARCA = /^(X|V|✓|✔|OK|TRUE|VERDADEIRO|VENCEU|VENCEDOR|W)$/;
+
+  function parseTab(grid, tid) {
+    var g = Array.isArray(grid) ? grid : [];
+    var T = { id: tid, nome: tid === 'T1' ? 'Torneio 1' : 'Torneio 2', players: [], rounds: [], gf: null, simulacao: false, lido: !!grid };
+    if (!g.length) return T;
+
+    var gfPos = findFirst(g, function (v) { return v.indexOf('GRANDE FINAL') === 0; });
+    var limit = gfPos ? gfPos.r : g.length;
+
+    /* ---------- modo ---------- */
+    var mp = findFirst(g, function (v) { return v === 'MODO:' || v === 'MODO'; });
+    if (mp) T.simulacao = /^(TESTE|SIMULA)/.test(norm(val(g, mp.r, mp.c + 1)));
+
+    /* ---------- jogadores ---------- */
+    var hp = findFirst(g, function (v, r, c) {
+      if (v !== '#ID' && v !== '#ID DO CARD') return false;
+      return inRow(g, r, function (x) { return x === 'NICK' || x.indexOf('NICK') === 0 && x.indexOf('TESTE') < 0; }, c + 1, c + 5) >= 0;
+    }, 0, limit);
+    var byId = {}, byNick = {}, byName = {};
+    function add(p) {
+      T.players.push(p);
+      if (p.tag) byId[String(parseInt(p.tag, 10))] = p;
+      byNick[norm(p.nick)] = p;
+      if (p.nomeFull) byName[norm(p.nomeFull)] = p;
+      return p;
+    }
+    if (hp) {
+      var cNick = inRow(g, hp.r, function (x) { return x === 'NICK' || x.indexOf('NICK') === 0 && x.indexOf('TESTE') < 0; }, hp.c + 1, hp.c + 5);
+      var cNome = inRow(g, hp.r, function (x) { return x === 'NOME' || x === 'NOME COMPLETO'; }, hp.c + 1, hp.c + 5);
+      for (var r = hp.r + 1; r < limit; r++) {
+        var nick = val(g, r, cNick), id = val(g, r, hp.c).replace(/\D/g, '');
+        if (!nick) continue;
+        if (byNick[norm(nick)]) continue;
+        var full = cNome >= 0 ? val(g, r, cNome) : '';
+        add({ pid: id ? 'id' + parseInt(id, 10) : 'n' + norm(nick), tag: id, nick: nick, nome: C.firstName(full), nomeFull: full, ffid: '', ativo: true });
+      }
+    }
+
+    function resolve(text, soConhecidos) {
+      var t = String(text || '').trim();
+      if (!t) return null;
+      var n = norm(t);
+      if (byNick[n]) return byNick[n];
+      if (byName[n]) return byName[n];
+      var m = n.match(/^#?\s*(\d{1,3})(?:\b|$)/) || n.match(/\(#?\s*(\d{1,3})\)$/);
+      if (m && byId[String(parseInt(m[1], 10))]) return byId[String(parseInt(m[1], 10))];
+      var best = null;
+      T.players.forEach(function (p) {
+        var k = norm(p.nick);
+        if (k.length >= 2 && n.indexOf(k) >= 0 && (!best || k.length > norm(best.nick).length)) best = p;
+      });
+      if (best) return best;
+      if (soConhecidos) return null;
+      return add({ pid: 'x' + n, tag: '', nick: t.replace(/^#\s*\d{1,3}\s*[-·.]?\s*/, ''), nome: '', ffid: '', ativo: true });
+    }
+    T._resolve = resolve;
+
+    /* ---------- rodadas ---------- */
+    var hr = findFirst(g, function (v, r, c) { return v === 'MESA' && norm(val(g, r, c + 1)).indexOf('CONFRONTO') === 0; }, 0, limit);
+    if (hr) {
+      var cols = [];
+      var row = g[hr.r] || [];
+      for (var c = 0; c < row.length; c++) {
+        if (norm(row[c]) === 'MESA' && norm(val(g, hr.r, c + 1)).indexOf('CONFRONTO') === 0) {
+          var wc = inRow(g, hr.r, function (x) { return x.indexOf('QUEM GANHOU') === 0 || x.indexOf('VENCEDOR') === 0 || x === 'RESULTADO'; }, c + 2, c + 4);
+          cols.push({ mc: c, cc: c + 1, wc: wc < 0 ? c + 2 : wc });
+        }
+      }
+      for (var k = 0; k < cols.length; k++) {
+        var col = cols[k], matches = [];
+        for (var rr = hr.r + 1; rr < limit; rr++) {
+          var mv = val(g, rr, col.mc);
+          if (!/^\d{1,2}$/.test(mv)) continue;
+          var mesa = parseInt(mv, 10);
+          var topT = val(g, rr, col.cc), botT = val(g, rr + 1, col.cc);
+          var folga = /^(FOLGA|BYE|W\.?O\.?|-+|—)$/;
+          var topF = folga.test(norm(topT)), botF = folga.test(norm(botT));
+          var a = topF ? null : resolve(topT), b = botF ? null : resolve(botT);
+          if (!a && !b) continue;
+          if (!a || !b) {
+            var only = a || b;
+            matches.push({ mesa: null, a: only.pid, b: null, w: only.pid, bye: true });
+            continue;
+          }
+          var w1 = norm(val(g, rr, col.wc)), w2 = norm(val(g, rr + 1, col.wc)), w = null;
+          if (/^1\b/.test(w1)) w = a.pid;
+          else if (/^2\b/.test(w1)) w = b.pid;
+          else if (MARCA.test(w1) && !MARCA.test(w2)) w = a.pid;
+          else if (MARCA.test(w2) && !MARCA.test(w1)) w = b.pid;
+          else if (w1) { var pw = resolve(val(g, rr, col.wc), true); if (pw && (pw === a || pw === b)) w = pw.pid; }
+          matches.push({ mesa: mesa, a: a.pid, b: b.pid, w: w });
+        }
+        if (!matches.some(function (m) { return !m.bye; })) break;
+        var act = matches.filter(function (m) { return !m.bye; });
+        var done = act.filter(function (m) { return m.w; }).length;
+        T.rounds.push({ n: k + 1, matches: matches, status: done === 0 ? 'pareada' : (done < act.length ? 'em_jogo' : 'encerrada') });
+      }
+      // rodada anterior só fica "fechada" de verdade se a seguinte já foi pareada
+      for (var i = 0; i < T.rounds.length - 1; i++) {
+        if (T.rounds[i].status !== 'encerrada') T.rounds[i].status = 'em_jogo';
+      }
+    }
+
+    /* ---------- grande final ---------- */
+    if (gfPos) {
+      var pc = inRow(g, gfPos.r, function (x) { return x === 'PLACAR'; }, gfPos.c + 1);
+      var cp = findFirst(g, function (v) { return v === 'CAMPEAO' || v === 'CAMPEA' || v === 'CAMPEAO(A)'; }, gfPos.r);
+      var rEnd = cp ? cp.r : Math.min(g.length, gfPos.r + 6);
+      var fin = [], pts = [];
+      for (var gr = gfPos.r + 1; gr < rEnd; gr++) {
+        var cMax = pc > 0 ? pc : gfPos.c + 3;
+        for (var gc = Math.max(0, gfPos.c - 1); gc < cMax; gc++) {
+          var p = resolve(val(g, gr, gc), true);
+          if (p && fin.indexOf(p) < 0 && fin.length < 2) { fin.push(p); }
+        }
+        if (pc > 0) {
+          for (var sc = pc; sc < pc + 3; sc++) {
+            var sv = val(g, gr, sc);
+            var mm = sv.match(/^(\d+)\s*[x×:\-]\s*(\d+)$/i);
+            if (mm) { pts = [parseInt(mm[1], 10), parseInt(mm[2], 10)]; break; }
+            if (/^\d+$/.test(sv)) pts.push(parseInt(sv, 10));
+          }
+        }
+      }
+      var champ = null;
+      if (cp) {
+        var cn = inRow(g, cp.r, function (x) { return x === 'NICK'; }, cp.c + 1);
+        var ci = inRow(g, cp.r, function (x) { return x === '#ID'; }, cp.c + 1);
+        for (var cr = cp.r + 1; cr < Math.min(g.length, cp.r + 4) && !champ; cr++) {
+          champ = (cn >= 0 && resolve(val(g, cr, cn), true)) || (ci >= 0 && resolve(val(g, cr, ci), true)) || resolve(val(g, cr, cp.c), true);
+        }
+      }
+      if (fin.length < 2 && champ) {
+        var rk = C.ranking(T).filter(function (x) { return x.pid !== champ.pid; });
+        fin = [champ, rk[0] ? rk[0].p : null].filter(Boolean);
+      }
+      if (fin.length === 2) {
+        var pa = pts.length >= 2 ? pts[0] : 0, pb = pts.length >= 2 ? pts[1] : 0;
+        T.gf = {
+          a: fin[0].pid, b: fin[1].pid, pa: pa, pb: pb, formato: '', mesa: 8,
+          w: champ && (champ === fin[0] || champ === fin[1]) ? champ.pid : null
+        };
+        T.gf.status = T.gf.w ? 'encerrada' : (pa || pb ? 'em_jogo' : 'pareada');
+      }
+    }
+    delete T._resolve;
+    T.players.forEach(function (p) { delete p.nomeFull; });
+    return T;
+  }
+
+  function buildState(grids, opts) {
+    opts = opts || {};
+    var s = C.emptyState();
+    s.cfg.gfFormato = '';
+    if (opts.cfg) Object.assign(s.cfg, opts.cfg);
+    s.torneios.T1 = parseTab(grids && grids.T1, 'T1');
+    s.torneios.T2 = parseTab(grids && grids.T2, 'T2');
+    var T1 = s.torneios.T1, T2 = s.torneios.T2;
+    var t2Comecou = T2.rounds.some(function (r) { return r.matches.some(function (m) { return !m.bye && m.w; }); });
+    s.ativo = (t2Comecou || (T2.rounds.length && !T1.rounds.length)) ? 'T2' : 'T1';
+    return s;
+  }
+
+  function parseCSV(text) {
+    var rows = [], row = [], cur = '', q = false;
+    text = String(text || '').replace(/^﻿/, '');
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (q) {
+        if (ch === '"' && text[i + 1] === '"') { cur += '"'; i++; }
+        else if (ch === '"') q = false;
+        else cur += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === ',') { row.push(cur); cur = ''; }
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i++;
+        row.push(cur); rows.push(row); row = []; cur = '';
+      } else cur += ch;
+    }
+    if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+    return rows;
+  }
+
+  var Sheet = { norm: norm, parseTab: parseTab, buildState: buildState, parseCSV: parseCSV };
+  if (typeof module !== 'undefined' && module.exports) module.exports = Sheet;
+  else root.Sheet = Sheet;
+})(this);
+
+</script>
+<script>
+/* =========================================================================
    AMOROSO CUP · APP (painel do League Ops, live e tela do DTV)
    ========================================================================= */
 (function () {
@@ -1057,6 +1292,14 @@ body.live.transparente { background: transparent; }
   /* Opcional: cole aqui a URL /exec do Apps Script para não precisar
      configurar em cada computador. O PIN nunca fica no arquivo. */
   var API_PADRAO = '';
+
+  /* FONTE DA LIVE: a aba de operação da planilha (T1 -AUTO / T2 -AUTO).
+     Preencha UMA das opções e suba o arquivo de novo no GitHub:
+       FONTE ........... URL /exec do Leitor.gs (atualiza em segundos)
+       CSV_T1 / CSV_T2 . links "Publicar na Web" em CSV de cada aba (atrasa alguns minutos) */
+  var FONTE = 'https://script.google.com/macros/s/AKfycbwDdKemGdKo8USp_TBCAzEKJja6dGGGSNocUokwOLz7FX7sDcF7x5-hCRQ4qGcDeL7S/exec';
+  var CSV_T1 = '';
+  var CSV_T2 = '';
 
   /* ------------------------------------------------------------ utilidades */
   var Q = new URLSearchParams(location.search);
@@ -1105,6 +1348,12 @@ body.live.transparente { background: transparent; }
   }
   function tick() {
     var now = Date.now();
+    document.querySelectorAll('[data-ago]').forEach(function (el) {
+      var t = Number(el.getAttribute('data-ago'));
+      if (!t) return;
+      var sec = Math.max(0, Math.round((now - t) / 1000));
+      el.textContent = sec < 60 ? 'há ' + sec + ' s' : 'há ' + Math.floor(sec / 60) + ' min';
+    });
     document.querySelectorAll('[data-since]').forEach(function (el) {
       var t = Number(el.getAttribute('data-since'));
       if (t) el.textContent = fmtClock(now - t);
@@ -1133,6 +1382,71 @@ body.live.transparente { background: transparent; }
     post: function (body) {
       return fetch(conf.api, { method: 'POST', body: JSON.stringify(body), redirect: 'follow', signal: this.signal(35000) })
         .then(function (r) { return r.json(); });
+    }
+  };
+
+  /* ------------------------------------------------- leitura da planilha */
+  var fonte = {
+    url: (Q.get('fonte') || FONTE || LS.get('ac_fonte') || '').trim(),
+    csv1: (Q.get('csv1') || CSV_T1 || LS.get('ac_csv1') || '').trim(),
+    csv2: (Q.get('csv2') || CSV_T2 || LS.get('ac_csv2') || '').trim()
+  };
+  var fonteFixa = !!(FONTE || CSV_T1 || CSV_T2);
+
+  var Leitura = {
+    key: '', lidoEm: 0, erro: '', nomes: null, busy: false, onTick: null,
+    ativa: function () { return !!(fonte.url || fonte.csv1 || fonte.csv2); },
+    intervalo: function () { return Number(Q.get('intervalo')) * 1000 || (fonte.url ? 3000 : 15000); },
+    buscar: function () {
+      if (fonte.url) {
+        var u = new URL(fonte.url);
+        u.searchParams.set('_', Date.now());
+        return fetch(u.toString(), { redirect: 'follow', cache: 'no-store', signal: Net.signal(15000) })
+          .then(function (r) { return r.json(); })
+          .then(function (res) {
+            if (!res || !res.ok) throw new Error((res && res.error) || 'Resposta inválida do leitor.');
+            Leitura.nomes = res.nomes || null;
+            return res.abas || {};
+          });
+      }
+      var csv = function (u) {
+        if (!u) return Promise.resolve(null);
+        return fetch(u + (u.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now(), { cache: 'no-store', signal: Net.signal(15000) })
+          .then(function (r) { if (!r.ok) throw new Error('A planilha publicada respondeu ' + r.status + '.'); return r.text(); })
+          .then(function (t) {
+            if (/^\s*</.test(t)) throw new Error('O link não é um CSV publicado.');
+            return window.Sheet.parseCSV(t);
+          });
+      };
+      Leitura.nomes = { T1: fonte.csv1 ? 'CSV publicado' : null, T2: fonte.csv2 ? 'CSV publicado' : null };
+      return Promise.all([csv(fonte.csv1), csv(fonte.csv2)]).then(function (a) { return { T1: a[0], T2: a[1] }; });
+    },
+    tick: function () {
+      if (Leitura.busy) return;
+      Leitura.busy = true;
+      Leitura.buscar().then(function (abas) {
+        var k = JSON.stringify(abas);
+        Leitura.lidoEm = Date.now(); Leitura.erro = '';
+        Store.setNet('ok');
+        if (k !== Leitura.key) {
+          Leitura.key = k;
+          Store.base = window.Sheet.buildState(abas);
+          Store.v = (Store.v || 0) + 1;
+          Store.recompute();
+        }
+      }).catch(function (e) {
+        Leitura.erro = (e && e.name === 'AbortError') ? 'A planilha demorou para responder.' : ((e && e.message) || 'Sem conexão com a planilha.');
+        if (/Failed to fetch|NetworkError|Load failed/i.test(Leitura.erro)) Leitura.erro = 'Sem conexão com a planilha.';
+        Store.setNet('erro', Leitura.erro);
+      }).then(function () {
+        Leitura.busy = false;
+        if (Leitura.onTick) Leitura.onTick();
+      });
+    },
+    start: function () {
+      Store.mode = 'leitura';
+      Leitura.tick();
+      setInterval(Leitura.tick, Leitura.intervalo());
     }
   };
 
@@ -1286,7 +1600,7 @@ body.live.transparente { background: transparent; }
     if (item.kind === 'gf') {
       var g = item.gf, gm = g.w ? { w: g.w } : null;
       return {
-        kind: 'duel', gf: true, where: 'Mesa ' + (g.mesa || s.cfg.palco), round: 'Melhor de ' + String(g.formato).replace(/\D/g, ''),
+        kind: 'duel', gf: true, where: 'Mesa ' + (g.mesa || s.cfg.palco), round: g.formato ? 'Melhor de ' + String(g.formato).replace(/\D/g, '') : 'Grande final',
         sides: [sideOf(s, tid, g.a, gm, { pts: g.pa }), sideOf(s, tid, g.b, gm, { pts: g.pb })], done: g.status === 'encerrada', t: tid
       };
     }
@@ -1699,7 +2013,8 @@ body.live.transparente { background: transparent; }
       '<div class="caixa"><div class="grade-campos"><label class="campo" style="grid-column:1/-1">URL do app (termina em /exec)<input data-inp="form" data-f="api" value="' + esc(ui.form.api != null ? ui.form.api : conf.api) + '" placeholder="https://script.google.com/macros/s/…/exec"></label>' +
       '<label class="campo">PIN<input data-inp="form" data-f="pin" value="' + esc(ui.form.pin != null ? ui.form.pin : conf.pin) + '" inputmode="numeric"></label></div>' +
       '<div class="modal-acoes" style="justify-content:flex-start"><button class="btn btn-1" data-act="conectar">Conectar</button><button class="btn btn-fino" data-act="irensaio">Usar sem planilha (ensaio)</button></div></div>' +
-      '<ol><li>Na planilha de inscrição: <b>Extensões &gt; Apps Script</b>, cole o arquivo <b>Code.gs</b> e salve.</li>' +
+      '<ol><li>Crie uma <b>planilha nova em branco</b> no Google Drive. Não use a planilha de inscrição.</li>' +
+      '<li>Nela: <b>Extensões &gt; Apps Script</b>, cole o arquivo <b>Code.gs</b>, salve e rode a função <b>testar</b>.</li>' +
       '<li><b>Implantar &gt; Nova implantação &gt; App da Web</b>. Executar como: Eu. Quem pode acessar: Qualquer pessoa.</li>' +
       '<li>Copie a URL que termina em <b>/exec</b> e cole acima com o PIN que está no topo do Code.gs.</li></ol></div>';
   }
@@ -1817,12 +2132,14 @@ body.live.transparente { background: transparent; }
       if (!/^https:\/\/script\.google(usercontent)?\.com\/.+/.test(api)) { toast('A URL precisa ser a do Apps Script, terminando em /exec.', true); return; }
       var old = conf.api; conf.api = api;
       Net.get({ action: 'ping', pin: pin }).then(function (res) {
+        if (res && !res.ok && res.error) { conf.api = old; toast(res.error, true); return; }
         if (!res || !res.ok) throw new Error('resposta');
         if (!res.pinOk) { conf.api = old; toast('Conectou na planilha "' + (res.planilha || '') + '", mas o PIN não confere.', true); return; }
         conf.pin = pin; LS.set('ac_api', api); LS.set('ac_pin', pin); LS.set('ac_modo', 'sheet');
         Store.mode = 'sheet'; Store.queue = [];
         return Store.load().then(function () {
-          toast('Conectado à planilha "' + res.planilha + '".');
+          if (res.inscricaoErro) toast('Conectado, mas não consegui ler a planilha de inscrição: ' + res.inscricaoErro, true);
+          else toast('Conectado. Grava em "' + res.planilha + '" e lê os inscritos de "' + res.inscricao + '".');
           ui.modal = null; ui.form = {};
           iniciarLoopOps();
           renderOps();
@@ -1961,15 +2278,15 @@ body.live.transparente { background: transparent; }
       var ms = vm.last.matches.filter(function (m) { return !m.bye; }).sort(function (a, b) { return a.mesa - b.mesa; });
       var segs = '<div class="seg">' + ms.map(function (m) { return '<i class="' + (m.w ? 'ok' : '') + '"></i>'; }).join('') + '</div>';
       if (vm.last.status === 'pareada') dir = segs + '<div class="txt"><b>Mesas sorteadas</b><br>começa em instantes</div>';
-      else if (vm.last.status === 'em_jogo') dir = segs + '<div class="txt"><b>' + vm.progress.done + ' de ' + vm.progress.total + '</b><br>resultados</div><div class="l-relogio num" data-since="' + (vm.last.inicio || Date.now()) + '">' + fmtClock(Date.now() - (vm.last.inicio || Date.now())) + '</div>';
+      else if (vm.last.status === 'em_jogo') dir = segs + '<div class="txt"><b>' + vm.progress.done + ' de ' + vm.progress.total + '</b><br>resultados</div>' + (vm.last.inicio ? '<div class="l-relogio num" data-since="' + vm.last.inicio + '">' + fmtClock(Date.now() - vm.last.inicio) + '</div>' : '');
       else dir = segs + '<div class="txt"><b>Rodada encerrada</b><br>' + (vm.last.n < cfg.rodadas ? 'próxima em instantes' : 'grande final a seguir') + '</div>';
-    } else if (vm.phase === 'gf' && T.gf.status === 'em_jogo') {
-      dir = '<div class="txt"><b>Melhor de ' + T.gf.formato.slice(2) + '</b><br>no palco</div><div class="l-relogio num" data-since="' + (T.gf.inicio || Date.now()) + '">' + fmtClock(Date.now() - (T.gf.inicio || Date.now())) + '</div>';
     } else if (vm.phase === 'gf') {
-      dir = '<div class="txt"><b>Melhor de ' + T.gf.formato.slice(2) + '</b><br>começa em instantes</div>';
+      var fmtGf = T.gf.formato ? 'Melhor de ' + String(T.gf.formato).replace(/\D/g, '') : 'Grande final';
+      dir = '<div class="txt"><b>' + fmtGf + '</b><br>' + (T.gf.status === 'em_jogo' ? 'no palco' : 'começa em instantes') + '</div>' +
+        (T.gf.status === 'em_jogo' && T.gf.inicio ? '<div class="l-relogio num" data-since="' + T.gf.inicio + '">' + fmtClock(Date.now() - T.gf.inicio) + '</div>' : '');
     }
     return '<header class="l-top"><div class="l-ev"><b>' + esc(cfg.evento) + '</b>' + (cfg.subtitulo ? '<span>' + esc(cfg.subtitulo) + '</span>' : '') + '</div>' +
-      '<div class="l-fase"><b>' + esc(T.nome) + '</b><span>' + esc(fase) + '</span></div><div class="l-prog">' + dir + '</div></header>';
+      '<div class="l-fase"><b>' + esc(T.nome) + '</b><span>' + esc(fase) + '</span>' + (T.simulacao ? '<i class="l-sim">simulação</i>' : '') + '</div><div class="l-prog">' + dir + '</div></header>';
   }
 
   function liveTabela(s, vm, opts) {
@@ -2127,6 +2444,21 @@ body.live.transparente { background: transparent; }
     if ((Q.get('fundo') || '').indexOf('transp') === 0) document.body.classList.add('transparente');
     $('#app').innerHTML = '<div class="tela"></div>';
     window.addEventListener('resize', fitTela);
+    if (Leitura.ativa()) {
+      Store.listeners.push(renderLive);
+      $('.tela').innerHTML = '<div class="l-aviso"><b>Conectando à planilha</b></div>';
+      fitTela();
+      Leitura.onTick = function () {
+        if (!Store.cur && Leitura.erro) { $('.tela').innerHTML = '<div class="l-aviso"><b>Conectando à planilha</b>' + esc(Leitura.erro) + '</div>'; fitTela(); }
+      };
+      Leitura.start();
+      return;
+    }
+    if (!Q.get('modo')) {
+      $('.tela').innerHTML = '<div class="l-aviso"><b>Falta ligar a planilha</b>Abra a página principal do site para conectar.</div>';
+      fitTela();
+      return;
+    }
     var useLocal = Q.get('modo') === 'local' || !conf.api;
     Store.mode = useLocal ? 'local' : 'sheet';
     Store.listeners.push(renderLive);
@@ -2175,7 +2507,7 @@ body.live.transparente { background: transparent; }
     var vm = C.viewModel(s, tid), T = vm.T, pm = vm.pm;
     var now = stageData(s, vm, vm.now), next = stageData(s, vm, vm.next);
     var cab = function (d) { return d && d.kind === 'duel' ? '<b>' + esc(d.round + ', ' + d.where.toLowerCase()) + '</b>' : ''; };
-    var h = '<div class="dtv"><div class="dtv-top"><h1>Tela do DTV</h1><span>' + esc(T.nome) + ', ' + esc(phaseLabel(T, s.cfg).toLowerCase()) + '. Atualiza sozinha.</span></div>';
+    var h = '<div class="dtv"><div class="dtv-top"><h1>Tela do DTV</h1><span>' + esc(T.nome) + ', ' + esc(phaseLabel(T, s.cfg).toLowerCase()) + (T.simulacao ? ' (simulação)' : '') + '. Atualiza sozinha.</span></div>';
     h += '<section class="dtv-sec forte"><h2>No palco agora ' + cab(now) + '</h2>' + dtvLinhas(now && !now.done ? now : null) + '</section>';
     h += '<section class="dtv-sec forte"><h2>Próximo no palco ' + cab(next) + '</h2>' + dtvLinhas(next) + '</section>';
     if (vm.last) {
@@ -2201,6 +2533,16 @@ body.live.transparente { background: transparent; }
       var el = e.target.closest('[data-act="copiar"]');
       if (el) copy(el.dataset.txt);
     });
+    if (Leitura.ativa()) {
+      Store.listeners.push(renderDTV);
+      $('#app').innerHTML = '<div class="dtv"><p class="dtv-vazio">Conectando à planilha…</p></div>';
+      Leitura.onTick = function () {
+        if (!Store.cur && Leitura.erro) $('#app').innerHTML = '<div class="dtv"><p class="dtv-vazio">Conectando à planilha… ' + esc(Leitura.erro) + '</p></div>';
+      };
+      Leitura.start();
+      return;
+    }
+    if (!Q.get('modo')) { $('#app').innerHTML = '<div class="dtv"><p class="dtv-vazio">Falta ligar a planilha. Abra a página principal do site para conectar.</p></div>'; return; }
     var useLocal = Q.get('modo') === 'local' || !conf.api;
     Store.mode = useLocal ? 'local' : 'sheet';
     Store.listeners.push(renderDTV);
@@ -2212,12 +2554,103 @@ body.live.transparente { background: transparent; }
     tentar();
   }
 
+
+  /* =======================================================================
+     STATUS DA TRANSMISSÃO (página principal)
+     ======================================================================= */
+  var st = { tema: LS.get('ac_tema') || 'bb', fixo: '', fundo: false, colar: '' };
+  function fonteParams() {
+    if (fonteFixa) return {};
+    if (fonte.url) return { fonte: fonte.url };
+    return { csv1: fonte.csv1, csv2: fonte.csv2 };
+  }
+  function linkStatus(label, params) {
+    var p = Object.assign({}, params, fonteParams(), { tema: st.tema === 'fluxo' ? 'fluxo' : '', fundo: st.fundo ? 'transparente' : '', t: st.fixo });
+    var u = liveLink(p);
+    return '<div class="link-l"><span>' + label + '</span><input readonly value="' + esc(u) + '" aria-label="' + esc(label) + '"><button class="btn btn-mini" data-act="copiar" data-txt="' + esc(u) + '">Copiar</button><a class="btn btn-mini btn-fino" href="' + esc(u) + '" target="_blank" rel="noopener">Abrir</a></div>';
+  }
+  function renderStatus() {
+    var ae = document.activeElement;
+    if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && ae.type !== 'checkbox' && !ae.readOnly) return;
+    var s = Store.cur, h = '<div class="dtv"><div class="dtv-top"><h1>Amoroso Cup</h1><span>Mesa de transmissão. A operação é toda na planilha; aqui só se confere a leitura e se copia os links do OBS.</span></div>';
+    if (!Leitura.ativa()) {
+      h += '<section class="dtv-sec forte"><h2>Ligar a planilha</h2><p class="dica" style="margin:0 0 10px">Cole o link do leitor (termina em /exec) ou os links CSV publicados das abas, um por linha: T1 primeiro, T2 depois.</p>' +
+        '<label class="campo"><textarea data-st="colar" style="min-height:90px" placeholder="https://script.google.com/macros/s/…/exec">' + esc(st.colar) + '</textarea></label>' +
+        '<div class="modal-acoes" style="justify-content:flex-start"><button class="btn btn-1" data-act="st-ligar">Ligar</button></div></section>';
+    } else {
+      var net = Leitura.erro ? '<span class="net net-erro">' + esc(Leitura.erro) + '</span>' :
+        (Leitura.lidoEm ? '<span class="net net-ok">Lendo a planilha, atualizado <span data-ago="' + Leitura.lidoEm + '">agora</span></span>' : '<span class="net net-salvando">Conectando…</span>');
+      h += '<section class="dtv-sec"><h2>Planilha ' + net + '</h2>';
+      if (s) {
+        h += C.T_IDS.map(function (id) {
+          var T = s.torneios[id], nomeAba = Leitura.nomes && Leitura.nomes[id];
+          var desc;
+          if (!T.lido) desc = 'aba não encontrada' + (id === 'T2' ? ' (normal se ainda não foi criada)' : '');
+          else if (!T.players.length) desc = 'aba lida, sem jogadores ainda';
+          else desc = T.players.length + ' jogadores, ' + phaseLabel(T, s.cfg).toLowerCase();
+          var last = T.rounds[T.rounds.length - 1];
+          if (last && !T.gf) { var act = last.matches.filter(function (m) { return !m.bye; }); desc += ', ' + act.filter(function (m) { return m.w; }).length + ' de ' + act.length + ' resultados'; }
+          return '<div class="dtv-l"><span class="tg">' + id + '</span><span class="nk" style="font-size:26px">' + esc(T.nome) + (s.ativo === id ? ' <i class="selo ok">no ar</i>' : '') + (T.simulacao ? ' <i class="selo">simulação</i>' : '') + '</span><span class="info">' + esc(desc) + (nomeAba ? ' · aba ' + esc(nomeAba) : '') + '</span><span></span></div>';
+        }).join('');
+        h += '<p class="dica" style="margin:10px 0 0">A live troca sozinha para o Torneio 2 quando sair o primeiro resultado do T2. Até lá, o campeão do T1 fica no ar com o primeiro confronto do T2 como próximo no palco. Para travar num torneio, escolha abaixo.</p>';
+      }
+      h += '</section>';
+    }
+    h += '<section class="dtv-sec"><h2>Links do OBS</h2><p class="dica" style="margin:0 0 12px">Fonte de navegador em 1920×1080. A tela se ajusta sozinha.</p>' +
+      '<div class="grade-campos" style="margin-bottom:12px"><label class="campo">Cores<select data-st="tema"><option value="bb"' + (st.tema !== 'fluxo' ? ' selected' : '') + '>Azul e amarelo</option><option value="fluxo"' + (st.tema === 'fluxo' ? ' selected' : '') + '>Roxo Fluxo</option></select></label>' +
+      '<label class="campo">Torneio<select data-st="fixo"><option value="">Automático</option><option value="T1"' + (st.fixo === 'T1' ? ' selected' : '') + '>Sempre Torneio 1</option><option value="T2"' + (st.fixo === 'T2' ? ' selected' : '') + '>Sempre Torneio 2</option></select></label>' +
+      '<label class="campo" style="flex-direction:row;align-items:center;gap:8px;margin-top:22px"><input type="checkbox" data-st="fundo"' + (st.fundo ? ' checked' : '') + '> Fundo transparente</label></div>' +
+      '<div class="links">' + linkStatus('Live completa', { view: 'live' }) + linkStatus('Só classificação', { view: 'live', cena: 'tabela' }) +
+      linkStatus('Só o palco', { view: 'live', cena: 'palco' }) + linkStatus('Mesas da rodada', { view: 'live', cena: 'rodada' }) + linkStatus('Tela do DTV', { view: 'dtv' }) + '</div>' +
+      (!fonteFixa && Leitura.ativa() ? '<p class="dica" style="margin:12px 0 0">Os links já levam o endereço da planilha. <button class="btn btn-mini btn-fino" data-act="st-desligar">Trocar planilha</button></p>' : '') +
+      '</section></div>';
+    var y = window.scrollY;
+    $('#app').innerHTML = h;
+    window.scrollTo(0, y);
+  }
+  function bootStatus() {
+    document.addEventListener('click', function (e) {
+      var el = e.target.closest('[data-act]');
+      if (!el) return;
+      var a = el.dataset.act;
+      if (a === 'copiar') copy(el.dataset.txt);
+      if (a === 'st-ligar') {
+        var linhas = String(st.colar || '').split(/\s+/).map(function (x) { return x.trim(); }).filter(Boolean);
+        var url = linhas.filter(function (x) { return /script\.google(usercontent)?\.com/.test(x); })[0];
+        var csvs = linhas.filter(function (x) { return /docs\.google\.com\/spreadsheets\/.+(output=csv|\/pub)/.test(x); });
+        if (!url && !csvs.length) { toast('Cole o link /exec do leitor ou um link CSV publicado.', true); return; }
+        LS.set('ac_fonte', url || ''); LS.set('ac_csv1', url ? '' : (csvs[0] || '')); LS.set('ac_csv2', url ? '' : (csvs[1] || ''));
+        location.reload();
+      }
+      if (a === 'st-desligar') { ['ac_fonte', 'ac_csv1', 'ac_csv2'].forEach(LS.del); location.href = baseUrl(); }
+    });
+    document.addEventListener('input', function (e) { if (e.target.dataset.st === 'colar') st.colar = e.target.value; });
+    document.addEventListener('change', function (e) {
+      var k = e.target.dataset.st;
+      if (!k || k === 'colar') return;
+      st[k] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+      if (k === 'tema') LS.set('ac_tema', st.tema);
+      e.target.blur();
+      renderStatus();
+    });
+    Store.listeners.push(renderStatus);
+    var ultimo = '';
+    Leitura.onTick = function () {
+      document.querySelectorAll('[data-ago]').forEach(function (el) { el.setAttribute('data-ago', Leitura.lidoEm); });
+      var k = Leitura.erro + '|' + !!Leitura.lidoEm;
+      if (k !== ultimo) { ultimo = k; renderStatus(); }
+    };
+    renderStatus();
+    if (Leitura.ativa()) Leitura.start();
+  }
+
   /* ------------------------------------------------------------------ boot */
   document.documentElement.setAttribute('data-tema', Q.get('tema') === 'fluxo' ? 'fluxo' : 'bb');
   setInterval(tick, 1000);
   if (VIEW === 'live') bootLive();
   else if (VIEW === 'dtv') bootDTV();
-  else bootOps();
+  else if (VIEW === 'ops' && Q.get('modo') === 'local') bootOps();
+  else bootStatus();
 
   window.__AC = { Store: Store, ui: ui, conf: conf };
 })();
