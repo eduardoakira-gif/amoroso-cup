@@ -1098,7 +1098,14 @@ body.live.transparente { background: transparent; }
     var T = { id: tid, nome: tid === 'T1' ? 'Torneio 1' : 'Torneio 2', players: [], rounds: [], gf: null, simulacao: false, lido: !!grid };
     if (!g.length) return T;
 
-    var gfPos = findFirst(g, function (v) { return v.indexOf('GRANDE FINAL') === 0; });
+    /* o bloco da final é o "GRANDE FINAL" com PLACAR na mesma linha; um "Grande final"
+       solto (painel de status, instruções) não pode cortar a lista nem virar finalista */
+    var isGf = function (v) { return v.indexOf('GRANDE FINAL') === 0; };
+    var gfPos = findFirst(g, function (v, r, c) {
+      return isGf(v) && inRow(g, r, function (x) { return x === 'PLACAR'; }, c + 1) >= 0;
+    }) || findFirst(g, function (v, r, c) {
+      return isGf(v) && !val(g, r, c + 1) && !val(g, r, c - 1);
+    });
     var limit = gfPos ? gfPos.r : g.length;
 
     /* ---------- modo ---------- */
@@ -1156,7 +1163,7 @@ body.live.transparente { background: transparent; }
       var row = g[hr.r] || [];
       for (var c = 0; c < row.length; c++) {
         if (norm(row[c]) === 'MESA' && norm(val(g, hr.r, c + 1)).indexOf('CONFRONTO') === 0) {
-          var wc = inRow(g, hr.r, function (x) { return x.indexOf('QUEM GANHOU') === 0 || x.indexOf('VENCEDOR') === 0 || x === 'RESULTADO'; }, c + 2, c + 4);
+          var wc = inRow(g, hr.r, function (x) { return x.indexOf('QUEM GANHOU') === 0 || x.indexOf('VENCEDOR') === 0 || x.indexOf('VENCEU') === 0 || x === 'RESULTADO'; }, c + 2, c + 4);
           cols.push({ mc: c, cc: c + 1, wc: wc < 0 ? c + 2 : wc });
         }
       }
@@ -1402,7 +1409,13 @@ body.live.transparente { background: transparent; }
         var u = new URL(fonte.url);
         u.searchParams.set('_', Date.now());
         return fetch(u.toString(), { redirect: 'follow', cache: 'no-store', signal: Net.signal(15000) })
-          .then(function (r) { return r.json(); })
+          .then(function (r) {
+            return r.text().then(function (t) {
+              try { return JSON.parse(t); } catch (e) {
+                throw new Error(r.ok ? 'O leitor não devolveu dados. Confira se a implantação do Leitor.gs está como "Qualquer pessoa".' : 'O leitor respondeu ' + r.status + '.');
+              }
+            });
+          })
           .then(function (res) {
             if (!res || !res.ok) throw new Error((res && res.error) || 'Resposta inválida do leitor.');
             Leitura.nomes = res.nomes || null;
@@ -1579,6 +1592,11 @@ body.live.transparente { background: transparent; }
   }
 
   /* ----------------------------------------- dados do palco (live/DTV/ops) */
+  /* "Rodada 2, mesa 8" / "Melhor de 3, mesa 8" / "Mesa 8" (final sem formato na planilha) */
+  function rotulo(d) {
+    var t = [d.round, d.where ? String(d.where).toLowerCase() : ''].filter(Boolean).join(', ');
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  }
   function statsFor(s, tid) { return C.computeStats(s.torneios[tid]); }
   function sideOf(s, tid, pid, m, extra) {
     var T = s.torneios[tid], p = C.playerMap(T)[pid];
@@ -1600,7 +1618,7 @@ body.live.transparente { background: transparent; }
     if (item.kind === 'gf') {
       var g = item.gf, gm = g.w ? { w: g.w } : null;
       return {
-        kind: 'duel', gf: true, where: 'Mesa ' + (g.mesa || s.cfg.palco), round: g.formato ? 'Melhor de ' + String(g.formato).replace(/\D/g, '') : 'Grande final',
+        kind: 'duel', gf: true, where: 'Mesa ' + (g.mesa || s.cfg.palco), round: g.formato ? 'Melhor de ' + String(g.formato).replace(/\D/g, '') : '',
         sides: [sideOf(s, tid, g.a, gm, { pts: g.pa }), sideOf(s, tid, g.b, gm, { pts: g.pb })], done: g.status === 'encerrada', t: tid
       };
     }
@@ -1865,7 +1883,7 @@ body.live.transparente { background: transparent; }
       return r.w ? esc(r.w.nick) : 'Vencedor da mesa ' + r.mesa;
     }).join('<span class="x">×</span>') + '<small>Grande final</small></div>';
     var sides = d.sides.map(function (x) { return esc(x.nick) + (d.gf ? ' ' + x.pts : ''); });
-    return h + '<div class="noar-d">' + sides.join('<span class="x">×</span>') + '<small>' + esc(d.round + ', ' + d.where.toLowerCase()) + (d.provisorio ? ' (provisório)' : '') + '</small></div>';
+    return h + '<div class="noar-d">' + sides.join('<span class="x">×</span>') + '<small>' + esc(rotulo(d)) + (d.provisorio ? ' (provisório)' : '') + '</small></div>';
   }
   function sideArea(s, T) {
     var vm = C.viewModel(s, ui.t), onAir = s.ativo === ui.t;
@@ -2326,7 +2344,7 @@ body.live.transparente { background: transparent; }
   }
   function stageCard(d, label, cls, big) {
     if (!d) return '';
-    var right = d.kind === 'duel' ? (d.round + (d.where ? ', ' + d.where.toLowerCase() : '')) : (d.kind === 'proj' ? 'Grande final' : '');
+    var right = d.kind === 'duel' ? rotulo(d) : (d.kind === 'proj' ? 'Grande final' : '');
     if (d.provisorio) right = 'Grande final, provisória';
     return '<div class="' + cls + '"><div class="l-palco-cab"><span>' + label + '</span><span>' + esc(right) + '</span></div>' + duelHtml(d, big) + '</div>';
   }
@@ -2506,7 +2524,7 @@ body.live.transparente { background: transparent; }
     if (C.T_IDS.indexOf(tid) < 0) tid = s.ativo;
     var vm = C.viewModel(s, tid), T = vm.T, pm = vm.pm;
     var now = stageData(s, vm, vm.now), next = stageData(s, vm, vm.next);
-    var cab = function (d) { return d && d.kind === 'duel' ? '<b>' + esc(d.round + ', ' + d.where.toLowerCase()) + '</b>' : ''; };
+    var cab = function (d) { return d && d.kind === 'duel' ? '<b>' + esc(rotulo(d)) + '</b>' : ''; };
     var h = '<div class="dtv"><div class="dtv-top"><h1>Tela do DTV</h1><span>' + esc(T.nome) + ', ' + esc(phaseLabel(T, s.cfg).toLowerCase()) + (T.simulacao ? ' (simulação)' : '') + '. Atualiza sozinha.</span></div>';
     h += '<section class="dtv-sec forte"><h2>No palco agora ' + cab(now) + '</h2>' + dtvLinhas(now && !now.done ? now : null) + '</section>';
     h += '<section class="dtv-sec forte"><h2>Próximo no palco ' + cab(next) + '</h2>' + dtvLinhas(next) + '</section>';
